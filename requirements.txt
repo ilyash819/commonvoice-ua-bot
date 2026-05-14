@@ -1,0 +1,7 @@
+firebase-functions
+firebase-admin
+requests
+python-telegram-bot
+pandas
+matplotlib
+Pillow>=10.0.0
