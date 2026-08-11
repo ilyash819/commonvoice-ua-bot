@@ -2,11 +2,14 @@ from firebase_functions import https_fn, options
 from firebase_admin import db
 import asyncio
 import os
+import hmac
 import io
+import urllib.parse
 import base64
 from datetime import datetime
 import telegram
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')  # fixes crashing issues on cloud servers
@@ -15,7 +18,35 @@ import matplotlib.ticker as ticker
 from PIL import Image
 from typing import Tuple, Optional
 
-from shared import app, MAIN_MENU, CONTRIBUTION_TEXT, normalize_user_ids, download_bytes_from_storage
+from shared import (
+    app,
+    MAIN_MENU,
+    CONTRIBUTION_TEXT,
+    PRIVACY_TEXT,
+    download_bytes_from_storage,
+)
+from reminder_tasks import create_reminder
+
+
+async def send_privacy_notice(bot: telegram.Bot, chat_id: int) -> None:
+    """Send the privacy notice without markup parsing user-visible commands."""
+    await bot.send_message(chat_id=chat_id, text=PRIVACY_TEXT)
+
+
+REMINDER_HELP_TEXT = """⏰ Нагадування про внесок
+
+Вкажіть бажаний час за Києвом у 24-годинному форматі.
+
+Щодня:
+/remind_daily 14:30
+
+Щотижня:
+/remind_weekly 1 14:30
+
+Дні тижня: 1=понеділок, 2=вівторок, 3=середа, 4=четвер, 5=п’ятниця, 6=субота, 7=неділя.
+
+Показати поточне: /reminder
+Вимкнути: /reminder_off"""
 
 def generate_history_graph() -> Optional[io.BytesIO]:
     """Makes a progress chart and slaps it onto a nice background banner.
@@ -60,7 +91,7 @@ def generate_history_graph() -> Optional[io.BytesIO]:
 
     try:
         # Grab the background graphic banner from storage
-        bg_bytes = download_bytes_from_storage("gs://commonvoice-ua.firebasestorage.app/progress.png") 
+        bg_bytes = download_bytes_from_storage("progress.png")
         if bg_bytes: 
             background = Image.open(io.BytesIO(bg_bytes))
         else: 
@@ -97,7 +128,7 @@ def show_statistics() -> Tuple[str, Optional[io.BytesIO]]:
         # Format the actual message that the bot is going to send out
         msg = (
             f"📊 **Актуальна статистика проєкту:**\n\n"
-            f"👥 Учасників спільноти: **{latest_ref.get('speakers', 0)}**\n"
+            f"👥 Читачів: **{latest_ref.get('speakers', 0)}**\n"
             f"🎙 Записано годин: **{latest_ref.get('recorded', 0)} год.**\n"
             f"✅ Перевірено годин: **{latest_ref.get('validated', 0)} год.**\n\n"
             f"Дякуємо за ваш внесок! 🇺🇦"
@@ -126,7 +157,12 @@ def show_statistics() -> Tuple[str, Optional[io.BytesIO]]:
         print(f"💥 Помилка статистики: {e}")
         return "💥 Не вдалося завантажити статистику через технічну помилку.", None
 
-@https_fn.on_request(memory=options.MemoryOption.GB_1, timeout_sec=60, secrets=["ADMIN_TELEGRAM_ID", "TOKEN"])
+@https_fn.on_request(
+    memory=options.MemoryOption.GB_1,
+    timeout_sec=60,
+    min_instances=0,
+    secrets=["ADMIN_TELEGRAM_ID", "TOKEN", "TELEGRAM_WEBHOOK_SECRET"]
+)
 def telegram_bot(req: https_fn.Request) -> https_fn.Response:
     """The main webhook function that catches all updates from Telegram.
 
@@ -139,6 +175,15 @@ def telegram_bot(req: https_fn.Request) -> https_fn.Response:
     Returns:
         https_fn.Response: A simple status response back to Telegram so it doesn't retry.
     """
+    if req.method != "POST":
+        return https_fn.Response("Manual access not allowed", status=405)
+
+    expected_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    supplied_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not expected_secret or not hmac.compare_digest(supplied_secret, expected_secret):
+        print("Rejected unauthenticated Telegram webhook request.")
+        return https_fn.Response("Forbidden", status=403)
+
     token = os.environ.get("TOKEN")
     bot = telegram.Bot(token=token)
 
@@ -150,25 +195,87 @@ def telegram_bot(req: https_fn.Request) -> https_fn.Response:
                 return            
             if not update.message.text and not update.message.caption: 
                 return            
+            if update.message.chat.type != "private":
+                print(f"Ignored update from non-private chat {update.message.chat.id}.")
+                return
 
             chat_id = update.message.chat.id
             text = update.message.text
             caption = update.message.caption
             user = update.message.from_user
 
+            if user and text in ("/delete_me", "/stop"):
+                db.reference(f'users/{user.id}').delete()
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="✅ Ваші дані видалено. Ви більше не отримуватимете розсилки. Надішліть /start, щоб приєднатися знову."
+                )
+                return
+
             # Log user info into the database so we can track active profiles
             if user:
                 user_info = {
                     "first_name": str(user.first_name or "Користувач"),
-                    "last_name": str(user.last_name or ""),
                     "username": str(user.username or "No Username"),
                     "last_seen": datetime.now().isoformat()
                 }
-                db.reference(f'users/{chat_id}/profile').update(user_info)
+                db.reference(f'users/{user.id}/profile').update(user_info)
 
             # --- ROUTING RESPONSES BASED ON USER COMMANDS ---
             if text == "/start":
                 await bot.send_message(chat_id, CONTRIBUTION_TEXT, reply_markup=MAIN_MENU, parse_mode='Markdown')
+
+            elif text == "/privacy" or (text and text.replace("*", "").strip() == "🔐 Конфіденційність"):
+                await send_privacy_notice(bot, chat_id)
+
+            elif text == "⏰ Нагадування":
+                await bot.send_message(chat_id, REMINDER_HELP_TEXT)
+
+            elif text and text.startswith("/remind_daily"):
+                parts = text.split()
+                if len(parts) != 2:
+                    await bot.send_message(chat_id, "⚠️ Формат: /remind_daily ГГ:ХХ, наприклад /remind_daily 14:30")
+                else:
+                    try:
+                        reminder = create_reminder(user.id, "daily", parts[1])
+                        await bot.send_message(chat_id, f"✅ Щоденне нагадування встановлено на {reminder['time']} за Києвом.")
+                    except ValueError:
+                        await bot.send_message(chat_id, "⚠️ Вкажіть правильний час у форматі ГГ:ХХ, наприклад 14:30.")
+                    except Exception as exc:
+                        print(f"Could not schedule daily reminder for {user.id}: {exc}")
+                        await bot.send_message(chat_id, "⚠️ Не вдалося запланувати нагадування. Спробуйте пізніше.")
+
+            elif text and text.startswith("/remind_weekly"):
+                parts = text.split()
+                try:
+                    weekday = int(parts[1]) if len(parts) == 3 else 0
+                except ValueError:
+                    weekday = 0
+                if weekday not in range(1, 8):
+                    await bot.send_message(chat_id, "⚠️ Формат: /remind_weekly ДЕНЬ ГГ:ХХ, наприклад /remind_weekly 1 14:30")
+                else:
+                    try:
+                        reminder = create_reminder(user.id, "weekly", parts[2], weekday)
+                        weekday_names = ('', 'понеділок', 'вівторок', 'середу', 'четвер', 'п’ятницю', 'суботу', 'неділю')
+                        await bot.send_message(chat_id, f"✅ Щотижневе нагадування встановлено на {weekday_names[weekday]}, {reminder['time']} за Києвом.")
+                    except ValueError:
+                        await bot.send_message(chat_id, "⚠️ Вкажіть правильний день і час, наприклад /remind_weekly 1 14:30.")
+                    except Exception as exc:
+                        print(f"Could not schedule weekly reminder for {user.id}: {exc}")
+                        await bot.send_message(chat_id, "⚠️ Не вдалося запланувати нагадування. Спробуйте пізніше.")
+
+            elif text == "/reminder":
+                reminder = db.reference(f'users/{user.id}/reminder').get()
+                if not reminder or not reminder.get('enabled'):
+                    await bot.send_message(chat_id, "⏰ Нагадування не встановлено.")
+                elif reminder.get('frequency') == 'daily':
+                    await bot.send_message(chat_id, f"⏰ Щодня о {reminder.get('time')} за Києвом.")
+                else:
+                    await bot.send_message(chat_id, f"⏰ Щотижня: день {reminder.get('weekday')}, {reminder.get('time')} за Києвом.")
+
+            elif text == "/reminder_off":
+                db.reference(f'users/{user.id}/reminder').delete()
+                await bot.send_message(chat_id, "✅ Нагадування вимкнено.")
                 
             elif text in ["/статистика", "📊 Статистика"]:
                 msg, graph_buf = show_statistics()
@@ -183,17 +290,20 @@ def telegram_bot(req: https_fn.Request) -> https_fn.Response:
                 await bot.send_message(chat_id=chat_id, text=CONTRIBUTION_TEXT, reply_markup=markup, parse_mode='Markdown')
 
             elif text == "👥 Поділитись з другом":
-                import urllib.parse
-                
-                share_text = (
-                    "Привіт! Долучайся до проєкту Mozilla Common Voice. "
-                    "Давай разом навчимо штучний інтелект розуміти українську мову бездоганно! 🇺🇦\n\n"
-                    "Переходь у бот проєкту: https://t.me/UkrBot_bot"
+                bot_username = os.environ.get("BOT_USERNAME", "").lstrip("@")
+                share_target = (
+                    f"https://t.me/{bot_username}"
+                    if bot_username
+                    else "https://commonvoice.mozilla.org/uk/listen"
                 )
-                
-                # Format string to URL parameters so Telegram client opens the share panel cleanly
-                encoded_text = urllib.parse.quote(share_text)
-                native_share_url = f"https://t.me/share/url?url={encoded_text}"
+                native_share_url = "https://t.me/share/url?" + urllib.parse.urlencode({
+                    "url": share_target,
+                    "text": (
+                        "Привіт! Долучайся до проєкту Mozilla Common Voice. "
+                        "Давай разом навчимо штучний інтелект розуміти "
+                        "українську мову бездоганно! 🇺🇦"
+                    ),
+                })
                 
                 share_markup = InlineKeyboardMarkup([[
                     InlineKeyboardButton(
@@ -214,9 +324,6 @@ def telegram_bot(req: https_fn.Request) -> https_fn.Response:
             TELEGRAM_ID = int(env_admin_id) if env_admin_id else 0
 
             if chat_id == TELEGRAM_ID:
-                all_users_raw = db.reference('users').get()
-                admin_user_ids = normalize_user_ids(all_users_raw)
-
                 # Broadcast engine: sends media updates to everyone registered in database
                 if caption and caption.startswith("/send_all"):
                     try:
@@ -227,41 +334,25 @@ def telegram_bot(req: https_fn.Request) -> https_fn.Response:
                         if not photo_id and not video_id: 
                             return
 
-                        success, fail = 0, 0
-                        for target_uid in admin_user_ids:
-                            try:
-                                if target_uid == chat_id: 
-                                    continue
-                                if photo_id: 
-                                    await bot.send_photo(chat_id=target_uid, photo=photo_id, caption=caption_text, parse_mode='Markdown')
-                                elif video_id: 
-                                    await bot.send_video(chat_id=target_uid, video=video_id, caption=caption_text, parse_mode='Markdown')
-                                success += 1
-                                # Slow down iteration slightly so Telegram doesn't rate-limit or ban the bot
-                                await asyncio.sleep(0.05)
-                            except Exception: 
-                                fail += 1
-                        await bot.send_message(chat_id=chat_id, text=f"✅ `{success}` | ❌ `{fail}`", parse_mode='Markdown')
+                        queued = db.reference('broadcast_queue').push({
+                            'text': caption_text,
+                            'image_url': photo_id or video_id,
+                            'media_source': 'telegram_file_id',
+                            'media_type': 'photo' if photo_id else 'video',
+                            'status': 'pending',
+                            'processed': False,
+                            'created_at': datetime.now().isoformat(),
+                        })
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"✅ Broadcast queued: `{queued.key}`",
+                            parse_mode='Markdown'
+                        )
                     except Exception as e: 
                         await bot.send_message(chat_id=chat_id, text=f"⚠️ **Error:** {e}")
                         
-                elif text == "/admin_users":
-                    if not all_users_raw: 
-                        return
-                    report = "👥 **Registered Bot Users:**\n━━━━━━━━━━━━━━━\n"
-                    items = all_users_raw.items() if isinstance(all_users_raw, dict) else enumerate(all_users_raw)
-                    for uid, details in items:
-                        if details is None: 
-                            continue
-                        profile = details.get('profile', {}) if isinstance(details, dict) else {}
-                        username = profile.get('username', 'No Username')
-                        report += f"• {profile.get('first_name', 'Unknown')} (@{username}) — ID: `{uid}`\n" if username != "No Username" else f"• {profile.get('first_name', 'Unknown')} — ID: `{uid}`\n"
-                    await bot.send_message(chat_id, report, parse_mode='Markdown')
         except Exception as e: 
             print(f"Update Error: {e}")
 
-    # Make sure we only process post requests coming from actual webhooks
-    if req.method == "POST":
-        asyncio.run(process_update())
-        return https_fn.Response("OK")
-    return https_fn.Response("Manual access not allowed", status=405)
+    asyncio.run(process_update())
+    return https_fn.Response("OK")
