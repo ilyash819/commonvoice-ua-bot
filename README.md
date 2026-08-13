@@ -1,14 +1,16 @@
-# Ukrainian Common Voice Telegram Bot
+# Multilingual Common Voice Telegram Bot
 
-A serverless Telegram bot that helps Ukrainian speakers contribute to [Mozilla Common Voice](https://commonvoice.mozilla.org/uk). It displays current contribution statistics, sends community broadcasts, and lets each user schedule daily or weekly reminders at a time they choose.
+A multilingual serverless Telegram bot for contributing to [Mozilla Common Voice](https://commonvoice.mozilla.org/). It displays statistics for each user's chosen language, sends community broadcasts, and supports daily or weekly reminders.
 
 The backend runs on Firebase and Google Cloud. It uses Python Cloud Functions, Realtime Database, Cloud Storage, Secret Manager, Cloud Scheduler, and Cloud Tasks. There is no continuously running server.
 
 ## Features
 
-- Ukrainian-language Telegram interface.
-- Current Common Voice statistics with generated charts.
-- Daily collection of Ukrainian Common Voice metrics.
+- Dynamic contribution-language catalog from Common Voice.
+- Persistent per-user language selection with `/language` switching.
+- JSON-based UI translations with English fallback.
+- Per-language Common Voice statistics with generated charts.
+- Daily collection of all contributable Common Voice language metrics.
 - Weekly growth broadcasts.
 - Configurable annual/holiday broadcasts.
 - Admin photo and video broadcasts with queued delivery.
@@ -25,8 +27,9 @@ The backend runs on Firebase and Google Cloud. It uses Python Cloud Functions, R
 | --- | --- |
 | `/start` | Open the main menu and contribution link. |
 | `/privacy` | Display the privacy notice. |
-| `/статистика` | Show current statistics and a progress chart. |
-| `/долучитись` | Open Ukrainian Common Voice. |
+| `/language` | Choose a different Common Voice contribution language. |
+| `/statistics` | Show current statistics and a progress chart. |
+| `/contribute` | Open Common Voice for the selected language. |
 | `/remind_daily 14:30` | Create or replace a daily reminder. |
 | `/remind_weekly 1 14:30` | Create or replace a weekly reminder; weekdays are 1–7, Monday–Sunday. |
 | `/reminder` | Display the current reminder. |
@@ -45,11 +48,11 @@ telegram_bot (HTTP function) ──────► Realtime Database
    │                                      │
    │ creates reminder                     │ broadcast_queue create event
    ▼                                      ▼
-Cloud Tasks ── scheduled dispatch ─► deliver_reminder
+Cloud Tasks ── scheduled dispatch ─► deliverreminder
                                           │
                                           └──► Telegram
 
-Cloud Scheduler ──► statistics, recurring broadcasts, cleanup
+Cloud Scheduler ──► statistics with cleanup, recurring broadcasts
 Cloud Storage   ──► optional progress/excitement image assets
 ```
 
@@ -133,7 +136,7 @@ Never commit tokens, `.secret.local`, service-account JSON files, or populated `
 firebase deploy --only functions,database,storage
 ```
 
-The first deployment of `deliver_reminder` creates its Cloud Tasks queue. If task creation or invocation reports a permission error, complete the IAM procedure in [Firebase setup](docs/FIREBASE_SETUP.md#cloud-tasks-iam).
+The first deployment of `deliverreminder` creates its Cloud Tasks queue. If task creation or invocation reports a permission error, complete the IAM procedure in [Firebase setup](docs/FIREBASE_SETUP.md#cloud-tasks-iam).
 
 ### 6. Register the Telegram webhook
 
@@ -152,6 +155,17 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
 ```
 
 Open the bot in a private Telegram chat and send `/start`.
+
+## Localization
+
+English is the required fallback locale. Ukrainian is included as an example translation. To add another UI language:
+
+1. Copy `functions/locales/en.json` to `functions/locales/LOCALE.json`, where `LOCALE` matches the Common Voice locale code.
+2. Translate values only; do not rename keys or placeholders such as `{language}` and `{time}`.
+3. Run `cd functions && python -m unittest discover`.
+4. Open a pull request and mention the language and reviewer.
+
+A user's chosen contribution locale selects the same UI locale when that JSON file exists. Otherwise every UI string falls back to English. Language names in the selector use the English names supplied by Common Voice.
 
 ## Optional image assets
 
@@ -174,11 +188,11 @@ firebase emulators:start --only functions,database,storage
 
 Local task queue testing has limitations and may use deployed Google Cloud services depending on credentials. Use a separate development Firebase project and never point emulator secrets at a production bot.
 
-Run the scheduling tests:
+Run the tests:
 
 ```bash
 cd functions
-python -m unittest test_reminder_schedule.py
+python -m unittest discover
 ```
 
 ## Deployment notes
@@ -194,6 +208,7 @@ python -m unittest test_reminder_schedule.py
 - [Firebase setup and deployment](docs/FIREBASE_SETUP.md)
 - [Architecture and execution flows](docs/ARCHITECTURE.md)
 - [Realtime Database schema](docs/DATABASE_SCHEMA.md)
+- [Localization guide](docs/LOCALIZATION.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 

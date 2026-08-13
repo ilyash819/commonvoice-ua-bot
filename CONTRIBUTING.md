@@ -9,7 +9,7 @@ python3.12 -m venv functions/venv
 source functions/venv/bin/activate
 python -m pip install -r functions/requirements.txt
 cd functions
-python -m unittest test_reminder_schedule.py
+python -m unittest discover
 ```
 
 Use a dedicated development Firebase project and Telegram bot. Never test broadcasts against production user data.
@@ -22,7 +22,8 @@ Use a dedicated development Firebase project and Telegram bot. Never test broadc
 - Assume Cloud Tasks and database events can be delivered more than once.
 - Preserve user deletion and privacy behavior.
 - Add tests for scheduling, timezone, retry, or idempotency changes.
-- Keep user-facing Telegram messages in Ukrainian unless a localization design is introduced.
+- Keep every user-facing string in `functions/locales/*.json`; English keys are the source of truth.
+- Preserve translation placeholders exactly and name locale files using Common Voice locale codes.
 - Do not commit secrets, Firebase project aliases, production database exports, or service-account credentials.
 
 ## Pull requests

@@ -1,17 +1,53 @@
 from firebase_functions import db_fn, scheduler_fn, options
 from firebase_admin import db
-import requests
+import asyncio
 import io
 import os
 import time
 import uuid
 import zoneinfo
+import telegram
 from datetime import datetime, timedelta, timezone
 
+from common_voice import contribution_url, fetch_languages
+from i18n import t
 from shared import app, execute_telegram_broadcast, download_bytes_from_storage
 
 USER_RETENTION_DAYS = 365
 IMAGE_CACHE_RETENTION_DAYS = 14
+
+
+def _cleanup_expired_data() -> None:
+    """Remove inactive profiles and obsolete graph caches."""
+    now = datetime.now(timezone.utc)
+    user_cutoff = now - timedelta(days=USER_RETENTION_DAYS)
+    users = db.reference('users').get() or {}
+
+    if isinstance(users, dict):
+        for uid, details in users.items():
+            profile = details.get('profile', {}) if isinstance(details, dict) else {}
+            last_seen_raw = profile.get('last_seen')
+            if not last_seen_raw:
+                continue
+            try:
+                last_seen = datetime.fromisoformat(str(last_seen_raw))
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
+                if last_seen.astimezone(timezone.utc) < user_cutoff:
+                    db.reference('users').child(str(uid)).delete()
+            except (TypeError, ValueError):
+                print(f"Skipped user {uid}: invalid last_seen value.")
+
+    cache_cutoff = now.date() - timedelta(days=IMAGE_CACHE_RETENTION_DAYS)
+    caches = db.reference('database_image_cache').get() or {}
+    if isinstance(caches, dict):
+        for date_key in caches:
+            try:
+                if datetime.strptime(str(date_key), "%Y-%m-%d").date() < cache_cutoff:
+                    db.reference('database_image_cache').child(str(date_key)).delete()
+            except ValueError:
+                print(f"Skipped image cache with invalid date key: {date_key}")
+
 
 @scheduler_fn.on_schedule(
     schedule="0 0 * * *",
@@ -19,70 +55,85 @@ IMAGE_CACHE_RETENTION_DAYS = 14
     memory=options.MemoryOption.MB_512,
 )
 def collect_voice_stats(event):
-    """Hits the Mozilla Common Voice API daily at midnight to scrape fresh metrics."""
-    url = "https://commonvoice.mozilla.org/api/v1/stats/languages"
+    """Refresh Ukrainian metrics and perform daily data retention cleanup."""
     try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-
-        # Loop through the JSON array to fish out the Ukrainian ('uk') localized entry
-        uk = next((l for l in response.json() if l.get('locale') == 'uk'), None)
-        if uk:
-            now = datetime.now(zoneinfo.ZoneInfo("Europe/Kyiv"))
-            stats = {
-                "recorded": int(round(uk.get('recordedHours', 0))),
-                "validated": int(round(uk.get('validatedHours', 0))),
-                "speakers": int(uk.get('speakersCount', 0)),
-                "timestamp": now.isoformat()
-            }
-            # Log it twice: save a snapshot for historical charting and overwrite the absolute latest stats
-            today = now.strftime("%Y-%m-%d")
-            db.reference(f'history/{today}').set(stats)
-            db.reference('latest').set(stats)
+        languages = fetch_languages()
+        now = datetime.now(zoneinfo.ZoneInfo("Europe/Kyiv"))
+        today = now.strftime("%Y-%m-%d")
+        catalog = {}
+        for language in languages:
+            locale = language["locale"]
+            catalog[locale] = language
+        db.reference('common_voice_languages').set(catalog)
+        ukrainian = catalog.get("uk")
+        if not ukrainian:
+            raise RuntimeError("Ukrainian Common Voice statistics are unavailable.")
+        stats = {
+            "recorded": ukrainian["recorded"],
+            "validated": ukrainian["validated"],
+            "speakers": ukrainian["speakers"],
+            "timestamp": now.isoformat(),
+        }
+        db.reference('latest').set(stats)
+        db.reference('history').child(today).set(stats)
     except Exception as e:
         print(f"Collection failed: {e}")
+
+    try:
+        _cleanup_expired_data()
+    except Exception as e:
+        print(f"Cleanup failed: {e}")
 
 
 @scheduler_fn.on_schedule(schedule="0 11 * * 0", timezone="Europe/Kyiv", timeout_sec=300, secrets=["TOKEN"], memory=options.MemoryOption.GB_1)
 def weekly_sunday_growth_broadcast(event: scheduler_fn.ScheduledEvent) -> None:
-    """Calculates weekly net gains and pushes a celebratory progress update to everyone."""
+    """Send weekly Ukrainian Common Voice growth to users."""
     token = os.environ.get("TOKEN")
     today = datetime.now(zoneinfo.ZoneInfo("Europe/Kyiv"))
     today_str = today.strftime("%Y-%m-%d")
     past_str = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-
-    # Pull today's data (fall back to the global 'latest' node if needed) and compare it against last week
-    today_ref = db.reference(f'history/{today_str}').get() or db.reference('latest').get()
-    past_ref = db.reference(f'history/{past_str}').get()
-    if not today_ref or not past_ref:
+    users = db.reference('users').get() or {}
+    if not token or not isinstance(users, dict):
         return
-
-    # Calculate differences between current stats and last week's data points
-    growth_delta = int(today_ref.get('speakers', 0)) - int(past_ref.get('speakers', 0))
-    recorded_delta = int(today_ref.get('recorded', 0)) - int(past_ref.get('recorded', 0))
-    validated_delta = int(today_ref.get('validated', 0)) - int(past_ref.get('validated', 0))
-
-    # If nothing changed at all this week, skip the broadcast so we don't spam users
-    if growth_delta <= 0 and recorded_delta <= 0 and validated_delta <= 0:
-        return
-
-    # Pull the celebration banner asset from our Cloud Storage bucket
     bg_bytes = download_bytes_from_storage("excited.png")
-    if not bg_bytes:
+    deliveries = []
+    contribution_locale = "uk"
+    current = db.reference('history').child(today_str).get()
+    past = db.reference('history').child(past_str).get()
+    if not current or not past:
         return
-    final_buf = io.BytesIO(bg_bytes)
+    for uid, details in users.items():
+        if not str(uid).isdigit():
+            continue
+        speakers = int(current.get('speakers', 0)) - int(past.get('speakers', 0))
+        recorded = int(current.get('recorded', 0)) - int(past.get('recorded', 0))
+        validated = int(current.get('validated', 0)) - int(past.get('validated', 0))
+        if max(speakers, recorded, validated) <= 0:
+            continue
+        deliveries.append((int(uid), t(
+            "uk",
+            "growth.message",
+            language=t("uk", "language.name"),
+            speakers=max(0, speakers),
+            recorded=max(0, recorded),
+            validated=max(0, validated),
+        )))
 
-    # Compile markdown text mapping out the positive net deltas
-    message_lines = ["🎉 **Неймовірні новини за цей тиждень! Ось наш прогрес:**\n"]
-    if growth_delta > 0:
-        message_lines.append(f"👥 До спільноти читачів приєдналося: **+{growth_delta}** нових читачів (Разом: **{today_ref.get('speakers')}**)")
-    if recorded_delta > 0:
-        message_lines.append(f"🎙 Записано нових годин: **+{recorded_delta} год.** (Разом: **{today_ref.get('recorded')} год.**)")
-    if validated_delta > 0:
-        message_lines.append(f"✅ Перевірено нових годин: **+{validated_delta} год.** (Разом: **{today_ref.get('validated')} год.**)")
-    message_lines.append("\nДякуємо кожному за внесок у розвиток українського мовлення. Продовжуємо в тому ж дусі! 🇺🇦")
+    async def dispatch() -> None:
+        bot = telegram.Bot(token=token)
+        async with bot:
+            for uid, message in deliveries:
+                try:
+                    if bg_bytes:
+                        await bot.send_photo(chat_id=uid, photo=io.BytesIO(bg_bytes), caption=message, parse_mode='Markdown')
+                    else:
+                        await bot.send_message(chat_id=uid, text=message, parse_mode='Markdown')
+                    await asyncio.sleep(0.04)
+                except Exception as exc:
+                    print(f"Weekly growth delivery failed for {uid}: {exc}")
 
-    execute_telegram_broadcast(bot_token=token, text="\n".join(message_lines), media=final_buf, media_type="photo")
+    if deliveries:
+        asyncio.run(dispatch())
 
 
 @scheduler_fn.on_schedule(schedule="0 10 * * *", timezone="Europe/Kyiv", timeout_sec=300, secrets=["TOKEN"], memory=options.MemoryOption.GB_1)
@@ -196,40 +247,3 @@ def process_broadcast_queue_item(event: db_fn.Event[dict]) -> None:
         return finished
 
     item_ref.transaction(finish_claim)
-
-
-@scheduler_fn.on_schedule(
-    schedule="0 3 * * *",
-    timezone="Europe/Kyiv",
-    memory=options.MemoryOption.MB_256,
-)
-def cleanup_expired_data(event: scheduler_fn.ScheduledEvent) -> None:
-    """Remove inactive user profiles and obsolete generated-image caches."""
-    now = datetime.now(timezone.utc)
-    user_cutoff = now - timedelta(days=USER_RETENTION_DAYS)
-    users = db.reference('users').get() or {}
-
-    if isinstance(users, dict):
-        for uid, details in users.items():
-            profile = details.get('profile', {}) if isinstance(details, dict) else {}
-            last_seen_raw = profile.get('last_seen')
-            if not last_seen_raw:
-                continue
-            try:
-                last_seen = datetime.fromisoformat(str(last_seen_raw))
-                if last_seen.tzinfo is None:
-                    last_seen = last_seen.replace(tzinfo=timezone.utc)
-                if last_seen.astimezone(timezone.utc) < user_cutoff:
-                    db.reference('users').child(str(uid)).delete()
-            except (TypeError, ValueError):
-                print(f"Skipped user {uid}: invalid last_seen value.")
-
-    cache_cutoff = now.date() - timedelta(days=IMAGE_CACHE_RETENTION_DAYS)
-    caches = db.reference('database_image_cache').get() or {}
-    if isinstance(caches, dict):
-        for date_key in caches:
-            try:
-                if datetime.strptime(str(date_key), "%Y-%m-%d").date() < cache_cutoff:
-                    db.reference('database_image_cache').child(str(date_key)).delete()
-            except ValueError:
-                print(f"Skipped image cache with invalid date key: {date_key}")

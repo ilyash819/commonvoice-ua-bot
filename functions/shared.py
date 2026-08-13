@@ -21,32 +21,6 @@ if not _apps:
 else:
     app = _apps[0]
 
-MAIN_MENU = telegram.ReplyKeyboardMarkup([
-    [telegram.KeyboardButton(text='🌐 Долучитись до проєкту', web_app=telegram.WebAppInfo(url="https://commonvoice.mozilla.org/uk/listen"))],
-    [telegram.KeyboardButton(text='👥 Поділитись з другом')],
-    [telegram.KeyboardButton(text='📊 Статистика')],
-    [telegram.KeyboardButton(text='⏰ Нагадування')],
-    [telegram.KeyboardButton(text='🔐 Конфіденційність')]
-
-], resize_keyboard=True)
-
-
-CONTRIBUTION_TEXT = """👨‍💻 **Навчімо сучасні технології говорити українською!**
-
-Приділіть проєкту всього 5–10 хвилин:
-• **Начитуйте текст:** записуйте запропоновані фрази своїм природним голосом.
-• **Перевіряйте інших:** слухайте аудіозаписи та підтверджуйте точність вимови.
-
-Ваш голос — це внесок у майбутнє української мови в цифровому просторі.
-
-🔗 Тисніть кнопку нижче і долучайтеся! 🇺🇦"""
-
-PRIVACY_TEXT = """🔐 Конфіденційність
-
-Бот зберігає ваш Telegram ID, ім'я, username, час останньої активності та вибраний розклад нагадувань, щоб надавати команди бота та надсилати оновлення проєкту. Голосові записи бот не зберігає.
-
-Неактивні профілі видаляються через 365 днів. Ви можете негайно видалити свої дані та відмовитися від розсилок командою /delete_me або /stop."""
-
 def normalize_user_ids(all_users) -> list:
     """Safely extracts valid integer user IDs from Firebase list or dict structures."""
     if not all_users:

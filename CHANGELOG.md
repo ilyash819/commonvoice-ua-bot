@@ -6,6 +6,9 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Dynamic Common Voice language selection with persistent user preferences.
+- JSON localization files with English fallback and Ukrainian translation.
+- Per-language statistics, charts, contribution links, reminders, and growth messages.
 - Authenticated Telegram webhook handling.
 - Common Voice statistics collection, charts, and daily image caching.
 - Queued administrator photo and video broadcasts.
@@ -16,6 +19,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Statistics collection now refreshes every contributable Common Voice language.
 - Reminder delivery is event-driven and no longer scans the user database.
 - Firebase project and storage identifiers are discovered from runtime configuration.
 

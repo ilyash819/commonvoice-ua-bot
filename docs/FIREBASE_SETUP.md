@@ -74,7 +74,7 @@ The deployment creates:
 - One HTTP webhook function.
 - One Cloud Tasks queue function and queue.
 - One Realtime Database event function.
-- Four scheduled functions and their scheduler resources.
+- Three scheduled functions and their scheduler resources; daily cleanup runs with statistics collection.
 
 Deployment output includes the webhook URL. Save it for Telegram registration.
 
@@ -105,7 +105,7 @@ gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
   --member="serviceAccount:${RUNTIME_SA}" \
   --role="roles/iam.serviceAccountUser"
 
-gcloud functions add-iam-policy-binding deliver_reminder \
+gcloud functions add-iam-policy-binding deliverreminder \
   --gen2 \
   --region=us-central1 \
   --member="serviceAccount:${RUNTIME_SA}" \
@@ -140,6 +140,7 @@ Then test in a private chat:
 
 ```text
 /start
+/language
 /remind_daily 14:30
 /reminder
 /reminder_off
@@ -153,7 +154,7 @@ Run tests and redeploy:
 
 ```bash
 cd functions
-python -m unittest test_reminder_schedule.py
+python -m unittest discover
 cd ..
 firebase deploy --only functions
 ```

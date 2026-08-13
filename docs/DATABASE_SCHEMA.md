@@ -6,10 +6,12 @@ The database is server-managed. Client security rules intentionally deny direct 
 /
 ├── users/{telegram_user_id}
 │   ├── profile
+│   ├── preferences/language
 │   └── reminder
-├── latest
-├── history/{YYYY-MM-DD}
-├── database_image_cache/{YYYY-MM-DD}
+├── common_voice_languages/{locale}
+├── latest/{locale}
+├── history/{locale}/{YYYY-MM-DD}
+├── database_image_cache/{locale}/{YYYY-MM-DD}
 ├── recurring_broadcasts/{broadcast_id}
 └── broadcast_queue/{queue_id}
 ```
@@ -24,6 +26,13 @@ The database is server-managed. Client security rules intentionally deny direct 
         "first_name": "Example",
         "username": "example_user",
         "last_seen": "2026-04-11T14:10:00+00:00"
+      },
+      "preferences": {
+        "language": {
+          "locale": "uk",
+          "english_name": "Ukrainian",
+          "ui_locale": "uk"
+        }
       },
       "reminder": {
         "enabled": true,
@@ -48,17 +57,21 @@ The database is server-managed. Client security rules intentionally deny direct 
 ```json
 {
   "latest": {
-    "recorded": 1200,
-    "validated": 900,
-    "speakers": 5000,
-    "timestamp": "2026-04-11T03:00:00+03:00"
-  },
-  "history": {
-    "2026-08-11": {
+    "uk": {
       "recorded": 1200,
       "validated": 900,
       "speakers": 5000,
       "timestamp": "2026-04-11T03:00:00+03:00"
+    }
+  },
+  "history": {
+    "uk": {
+      "2026-08-11": {
+        "recorded": 1200,
+        "validated": 900,
+        "speakers": 5000,
+        "timestamp": "2026-04-11T03:00:00+03:00"
+      }
     }
   }
 }
@@ -111,4 +124,5 @@ The processor adds claim, lease, status, and `delivery_result` fields. Treat que
 - A user is deleted after 365 days without `profile.last_seen` activity.
 - A user can delete their record immediately with `/delete_me` or `/stop`.
 - Generated image caches older than 14 days are deleted.
+- Language catalogs and statistics are refreshed daily from Common Voice.
 - Statistics history, recurring broadcasts, and broadcast results have no automatic expiry.

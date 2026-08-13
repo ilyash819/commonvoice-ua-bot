@@ -10,9 +10,8 @@ from scheduler_functions import (
     weekly_sunday_growth_broadcast,
     daily_recurring_broadcast_checker,
     process_broadcast_queue_item,
-    cleanup_expired_data,
 )
-from reminder_tasks import deliver_reminder
+from reminder_tasks import deliverreminder
 
 __all__ = [
     "telegram_bot",
@@ -20,6 +19,5 @@ __all__ = [
     "weekly_sunday_growth_broadcast",
     "daily_recurring_broadcast_checker",
     "process_broadcast_queue_item",
-    "cleanup_expired_data",
-    "deliver_reminder",
+    "deliverreminder",
 ]

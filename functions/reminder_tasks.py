@@ -16,18 +16,13 @@ from google.auth.transport.requests import AuthorizedSession
 import telegram
 
 from reminder_schedule import DEFAULT_TIMEZONE, next_occurrence, validate_time
+from common_voice import contribution_url
+from i18n import t
 from shared import app
 
 
-TASK_FUNCTION_NAME = "deliver_reminder"
+TASK_FUNCTION_NAME = "deliverreminder"
 TASK_REGION = "us-central1"
-REMINDER_TEXT = (
-    "⏰ Час зробити внесок у Mozilla Common Voice! 🇺🇦\n\n"
-    "Навіть 5–10 хвилин допоможуть технологіям краще розуміти українську мову.\n"
-    "https://commonvoice.mozilla.org/uk/listen"
-)
-
-
 @lru_cache(maxsize=1)
 def _function_url() -> str:
     """Resolve the deployed gen-2 service URI and cache it per warm instance."""
@@ -151,7 +146,7 @@ def _clear_claim(reminder_ref, version: str, claim_id: str) -> None:
     retry_config=RetryConfig(max_attempts=5, min_backoff_seconds=30),
     rate_limits=RateLimits(max_concurrent_dispatches=20),
 )
-def deliver_reminder(request: tasks_fn.CallableRequest) -> dict:
+def deliverreminder(request: tasks_fn.CallableRequest) -> dict:
     """Validate, claim, deliver, and reschedule one contribution reminder."""
     payload = request.data
     if not isinstance(payload, dict):
@@ -200,9 +195,17 @@ def deliver_reminder(request: tasks_fn.CallableRequest) -> dict:
             raise RuntimeError("Reminder delivery cancelled: bot token is missing.")
 
         async def dispatch() -> None:
+            contribution_locale = 'uk'
+            locale = 'uk'
+            message = t(
+                locale,
+                "reminder.delivery",
+                language=t(locale, "language.name"),
+                url=contribution_url(contribution_locale),
+            )
             bot = telegram.Bot(token=token)
             async with bot:
-                await bot.send_message(chat_id=int(user_id), text=REMINDER_TEXT)
+                await bot.send_message(chat_id=int(user_id), text=message)
 
         try:
             asyncio.run(dispatch())
